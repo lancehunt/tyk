@@ -36,6 +36,7 @@ type SessionState struct {
 	QuotaRenews      int64                       `json:"quota_renews"`
 	QuotaRemaining   int64                       `json:"quota_remaining"`
 	QuotaRenewalRate int64                       `json:"quota_renewal_rate"`
+	PolicyPerAPI     map[string]string					 `json:"policy_per_api"`
 	AccessRights     map[string]AccessDefinition `json:"access_rights"`
 	OrgID            string                      `json:"org_id"`
 	OauthClientID    string                      `json:"oauth_client_id"`

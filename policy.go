@@ -2,11 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"io/ioutil"
+	"time"
+
 	"github.com/Sirupsen/logrus"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
-	"io/ioutil"
-	"time"
 )
 
 type Policy struct {
@@ -17,6 +18,7 @@ type Policy struct {
 	Per              float64                     `bson:"per" json:"per"`
 	QuotaMax         int64                       `bson:"quota_max" json:"quota_max"`
 	QuotaRenewalRate int64                       `bson:"quota_renewal_rate" json:"quota_renewal_rate"`
+	PolicyPerAPI     map[string]string           `bson:"policy_per_api" json:"policy_per_api"`
 	AccessRights     map[string]AccessDefinition `bson:"access_rights" json:"access_rights"`
 	HMACEnabled      bool                        `bson:"hmac_enabled" json:"hmac_enabled"`
 	Active           bool                        `bson:"active" json:"active"`

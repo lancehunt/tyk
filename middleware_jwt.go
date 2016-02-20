@@ -306,6 +306,7 @@ func (k *JWTMiddleware) ProcessRequest(w http.ResponseWriter, r *http.Request, c
 					thisSessionState.Per = policy.Per
 					thisSessionState.QuotaMax = policy.QuotaMax
 					thisSessionState.QuotaRenewalRate = policy.QuotaRenewalRate
+					thisSessionState.PolicyPerAPI = policy.PolicyPerAPI
 					thisSessionState.AccessRights = policy.AccessRights
 					thisSessionState.HMACEnabled = policy.HMACEnabled
 					thisSessionState.IsInactive = policy.IsInactive

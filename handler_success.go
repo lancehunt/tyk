@@ -3,14 +3,15 @@ package main
 import (
 	"bytes"
 	b64 "encoding/base64"
-	"github.com/gorilla/context"
-	"github.com/pmylund/go-cache"
 	"io"
 	"net/http"
 	"runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gorilla/context"
+	"github.com/pmylund/go-cache"
 )
 
 // ContextKey is a key type to avoid collisions
@@ -24,6 +25,8 @@ const (
 	VersionData       = 2
 	VersionKeyContext = 3
 )
+
+const APISessionKeySuffix = ".API-"
 
 var SessionCache *cache.Cache = cache.New(10*time.Second, 5*time.Second)
 
@@ -69,7 +72,7 @@ func (t TykMiddleware) GetOrgSession(key string) (SessionState, bool) {
 }
 
 // ApplyPolicyIfExists will check if a policy is loaded, if it is, it will overwrite the session state to use the policy values
-func (t TykMiddleware) ApplyPolicyIfExists(key string, thisSession *SessionState) {
+func (t TykMiddleware) ApplyPolicyIfExists(key string, thisSession *SessionState, stripPolicyID bool) {
 	if thisSession.ApplyPolicyID != "" {
 		log.Debug("Session has policy, checking")
 		policy, ok := Policies[thisSession.ApplyPolicyID]
@@ -87,10 +90,16 @@ func (t TykMiddleware) ApplyPolicyIfExists(key string, thisSession *SessionState
 			thisSession.Per = policy.Per
 			thisSession.QuotaMax = policy.QuotaMax
 			thisSession.QuotaRenewalRate = policy.QuotaRenewalRate
+			thisSession.PolicyPerAPI = policy.PolicyPerAPI
 			thisSession.AccessRights = policy.AccessRights
 			thisSession.HMACEnabled = policy.HMACEnabled
 			thisSession.IsInactive = policy.IsInactive
 			thisSession.Tags = policy.Tags
+
+			// Usually the reason to remove is because it was a temporary policy ID
+			if stripPolicyID {
+				thisSession.ApplyPolicyID = ""
+			}
 
 			// Update the session in the session manager in case it gets called again
 			t.Spec.SessionManager.UpdateSession(key, *thisSession, t.Spec.APIDefinition.SessionLifetime)
@@ -102,22 +111,47 @@ func (t TykMiddleware) ApplyPolicyIfExists(key string, thisSession *SessionState
 // CheckSessionAndIdentityForValidKey will check first the Session store for a valid key, if not found, it will try
 // the Auth Handler, if not found it will fail
 func (t TykMiddleware) CheckSessionAndIdentityForValidKey(key string) (SessionState, bool) {
-	// Try and get the session from the session store
+	// 1. Try and get the base session
+	baseSession, baseFound := checkSessionAndValidateKey(key, t)
+	// 2. If base session has policy_per_api map for current API being requested
+	if baseFound {
+		if baseSession.PolicyPerAPI != nil {
+			// 2a. Check current per-api session
+			apiPolicyID := baseSession.PolicyPerAPI[t.Spec.APIID]
+			if apiPolicyID != "" {
+				// Ensure per-api session is setup to match base session
+				apiSessionKey := key + APISessionKeySuffix + t.Spec.APIID
+				perApiSession, apiSessionFound := checkSessionAndValidateKey(apiSessionKey, t)
+				// If not, create a per-api session to allow tracking policy at the API level
+				if !apiSessionFound {
+					// find policy and build new SessionState based upon it
+					perApiSession.ApplyPolicyID = apiPolicyID
+					t.ApplyPolicyIfExists(apiSessionKey, &perApiSession, true)
+				}
+			}
+		}
+	}
+
+	// 3. Return base session
+	return baseSession, baseFound
+}
+
+func checkSessionAndValidateKey(key string, t TykMiddleware) (SessionState, bool) {
 	var thisSession SessionState
 	var found bool
 
-	// Check in-memory cache
+	// 1. Check in-memory cache
 	if !config.LocalSessionCache.DisableCacheSessionState {
 		cachedVal, found := SessionCache.Get(key)
 		if found {
 			log.Debug("Key found in local cache")
 			thisSession = cachedVal.(SessionState)
-			t.ApplyPolicyIfExists(key, &thisSession)
+			t.ApplyPolicyIfExists(key, &thisSession, false)
 			return thisSession, true
 		}
 	}
 
-	// Check session store
+	// 2. Check session store
 	thisSession, found = t.Spec.SessionManager.GetSessionDetail(key)
 	if found {
 		// If exists, assume it has been authorized and pass on
@@ -125,12 +159,11 @@ func (t TykMiddleware) CheckSessionAndIdentityForValidKey(key string) (SessionSt
 		go SessionCache.Set(key, thisSession, cache.DefaultExpiration)
 
 		// Check for a policy, if there is a policy, pull it and overwrite the session values
-		t.ApplyPolicyIfExists(key, &thisSession)
+		t.ApplyPolicyIfExists(key, &thisSession, false)
 		return thisSession, true
 	}
 
-	// 2. If not there, get it from the AuthorizationHandler
-
+	// 3. If not there, get it from the AuthorizationHandler
 	thisSession, found = t.Spec.AuthManager.IsKeyAuthorised(key)
 	if found {
 		// If not in Session, and got it from AuthHandler, create a session with a new TTL
@@ -140,10 +173,9 @@ func (t TykMiddleware) CheckSessionAndIdentityForValidKey(key string) (SessionSt
 		go SessionCache.Set(key, thisSession, cache.DefaultExpiration)
 
 		// Check for a policy, if there is a policy, pull it and overwrite the session values
-		t.ApplyPolicyIfExists(key, &thisSession)
+		t.ApplyPolicyIfExists(key, &thisSession, false)
 		t.Spec.SessionManager.UpdateSession(key, thisSession, t.Spec.APIDefinition.SessionLifetime)
 	}
-
 	return thisSession, found
 }
 

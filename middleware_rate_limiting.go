@@ -27,18 +27,36 @@ func (k *RateLimitAndQuotaCheck) GetConfig() (interface{}, error) {
 
 // ProcessRequest will run any checks on the request on the way through the system, return an error to have the chain fail
 func (k *RateLimitAndQuotaCheck) ProcessRequest(w http.ResponseWriter, r *http.Request, configuration interface{}) (error, int) {
+	// 1. Get base session for this Request
 	thisSessionState := context.Get(r, SessionData).(SessionState)
 	authHeaderValue := context.Get(r, AuthHeaderValue).(string)
+	// 2. If base session has policy_per_api map for current API
+	if thisSessionState.PolicyPerAPI != nil {
+		apiSessionKey := authHeaderValue+APISessionKeySuffix+k.Spec.APIID;
+		perAPISession, found := k.Spec.SessionManager.GetSessionDetail(apiSessionKey)
+		if found {
+			//    a. Apply Limiter logic to per-api session only
+			return applyRateLimiting(apiSessionKey, perAPISession, k, r, configuration)
+			// REVIEW: should this return the baseSession or the api session????
+		}
+		// REVIEW: should this fall-through when not-found?
+	}
 
+	//   Else...
+	//    b. Apply limiter logic to base session
+	return applyRateLimiting(authHeaderValue, thisSessionState, k, r, configuration)
+}
+
+func applyRateLimiting(key string, thisSessionState SessionState, k *RateLimitAndQuotaCheck, r *http.Request, configuration interface{}) (error, int) {
 	storeRef := k.Spec.SessionManager.GetStore()
-	forwardMessage, reason := sessionLimiter.ForwardMessage(&thisSessionState, authHeaderValue, storeRef)
+	forwardMessage, reason := sessionLimiter.ForwardMessage(&thisSessionState, key, storeRef)
 
 	// Ensure quota and rate data for this session are recorded
 	if !config.UseAsyncSessionWrite {
-		k.Spec.SessionManager.UpdateSession(authHeaderValue, thisSessionState, 0)
+		k.Spec.SessionManager.UpdateSession(key, thisSessionState, 0)
 		context.Set(r, SessionData, thisSessionState)
 	} else {
-		go k.Spec.SessionManager.UpdateSession(authHeaderValue, thisSessionState, 0)
+		go k.Spec.SessionManager.UpdateSession(key, thisSessionState, 0)
 		go context.Set(r, SessionData, thisSessionState)
 	}
 
@@ -50,7 +68,7 @@ func (k *RateLimitAndQuotaCheck) ProcessRequest(w http.ResponseWriter, r *http.R
 			log.WithFields(logrus.Fields{
 				"path":   r.URL.Path,
 				"origin": r.RemoteAddr,
-				"key":    authHeaderValue,
+				"key":    key,
 			}).Info("Key rate limit exceeded.")
 
 			// Fire a rate limit exceeded event
@@ -59,7 +77,7 @@ func (k *RateLimitAndQuotaCheck) ProcessRequest(w http.ResponseWriter, r *http.R
 					EventMetaDefault: EventMetaDefault{Message: "Key Rate Limit Exceeded", OriginatingRequest: EncodeRequestToEvent(r)},
 					Path:             r.URL.Path,
 					Origin:           r.RemoteAddr,
-					Key:              authHeaderValue,
+					Key:              key,
 				})
 
 			// Report in health check
@@ -71,7 +89,7 @@ func (k *RateLimitAndQuotaCheck) ProcessRequest(w http.ResponseWriter, r *http.R
 			log.WithFields(logrus.Fields{
 				"path":   r.URL.Path,
 				"origin": r.RemoteAddr,
-				"key":    authHeaderValue,
+				"key":    key,
 			}).Info("Key quota limit exceeded.")
 
 			// Fire a quota exceeded event
@@ -80,7 +98,7 @@ func (k *RateLimitAndQuotaCheck) ProcessRequest(w http.ResponseWriter, r *http.R
 					EventMetaDefault: EventMetaDefault{Message: "Key Quota Limit Exceeded", OriginatingRequest: EncodeRequestToEvent(r)},
 					Path:             r.URL.Path,
 					Origin:           r.RemoteAddr,
-					Key:              authHeaderValue,
+					Key:              key,
 				})
 
 			// Report in health check
@@ -94,7 +112,7 @@ func (k *RateLimitAndQuotaCheck) ProcessRequest(w http.ResponseWriter, r *http.R
 
 	// Run the trigger monitor
 	if config.Monitor.MonitorUserKeys {
-		sessionMonitor.Check(&thisSessionState, authHeaderValue)
+		sessionMonitor.Check(&thisSessionState, key)
 	}
 
 	// Request is valid, carry on
